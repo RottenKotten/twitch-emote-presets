@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Twitch Emote Presets</title>
+  <meta name="description" content="Twitch Emote Presets — userscript для быстрого переключения наборов эмоута в Twitch Creator Dashboard.">
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0e0e10;
+      --panel: #18181b;
+      --panel-2: #1f1f23;
+      --border: #2f2f35;
+      --text: #efeff1;
+      --muted: #adadb8;
+      --accent: #9147ff;
+      --accent-hover: #772ce8;
+      --warning: #ffd37a;
+      --max: 980px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 50% -20%, rgba(145, 71, 255, .15), transparent 38%),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.55 Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .page {
+      width: min(calc(100% - 32px), var(--max));
+      margin: 0 auto;
+      padding: 48px 0 72px;
+    }
+
+    .hero {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(32px, 6vw, 54px);
+      line-height: 1.05;
+      letter-spacing: -0.035em;
+    }
+
+    .hero p {
+      max-width: 700px;
+      margin: 16px auto 0;
+      color: var(--muted);
+      font-size: 17px;
+    }
+
+    .hero-actions {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 18px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-2);
+      color: var(--text);
+      font-weight: 700;
+      text-decoration: none;
+      transition: background .12s ease, border-color .12s ease, transform .12s ease;
+    }
+
+    .button:hover {
+      background: #26262c;
+      border-color: #53535f;
+    }
+
+    .button:active {
+      transform: translateY(1px);
+    }
+
+    .button-primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    .button-primary:hover {
+      background: var(--accent-hover);
+      border-color: var(--accent-hover);
+    }
+
+    .card {
+      margin-top: 14px;
+      padding: 22px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: rgba(24, 24, 27, .96);
+      box-shadow: 0 12px 32px rgba(0, 0, 0, .18);
+    }
+
+    .card h2 {
+      margin: 0 0 14px;
+      font-size: 22px;
+    }
+
+    .video {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #000;
+    }
+
+    .video iframe {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .steps {
+      margin: 0;
+      padding-left: 22px;
+    }
+
+    .steps li {
+      margin: 0 0 12px;
+      padding-left: 5px;
+    }
+
+    .steps li:last-child {
+      margin-bottom: 0;
+    }
+
+    code {
+      padding: 2px 5px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--panel-2);
+      color: #d7c5ff;
+      font: .92em/1.4 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    .note {
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-left: 3px solid var(--warning);
+      border-radius: 4px;
+      background: var(--panel-2);
+      color: var(--muted);
+    }
+
+    .note strong {
+      color: var(--warning);
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .feature {
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--panel-2);
+    }
+
+    .feature strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .feature span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    footer {
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    footer a:hover {
+      color: var(--text);
+    }
+
+    @media (max-width: 680px) {
+      .page {
+        width: min(calc(100% - 20px), var(--max));
+        padding-top: 28px;
+      }
+
+      .card {
+        padding: 16px;
+      }
+
+      .feature-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-actions {
+        flex-direction: column;
+      }
+
+      .button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="page">
+    <section class="hero">
+      <h1>Twitch Emote Presets</h1>
+      <p>
+        Userscript для Twitch Creator Dashboard, который позволяет сохранять и быстро
+        переключать наборы эмоута по слотам.
+      </p>
+
+      <div class="hero-actions">
+        <a class="button button-primary" href="./twitch-emote-presets.user.js">
+          Install userscript
+        </a>
+        <a class="button" href="#how-to-use">
+          Как пользоваться
+        </a>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>How to use</h2>
+
+      <div class="video">
+        <iframe
+          src="https://www.youtube.com/embed/lIaYlecLzJ0?si=uPGq1NykhB8msZ17"
+          title="How to use"
+          frameborder="0"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          referrerpolicy="strict-origin-when-cross-origin"
+          allowfullscreen>
+        </iframe>
+      </div>
+    </section>
+
+    <section class="card" id="how-to-use">
+      <h2>Как пользоваться</h2>
+
+      <ol class="steps">
+        <li>
+          Установи расширение для userscript'ов, например Tampermonkey, и нажми
+          <strong>Install userscript</strong> выше.
+        </li>
+
+        <li>
+          Открой Twitch Creator Dashboard и перейди на страницу:
+          <code>/u/USER/viewer-rewards/emotes</code>.
+          Панель появляется только на странице управления эмоута.
+        </li>
+
+        <li>
+          При первом запуске прочитай <strong>AI Disclosure</strong>.
+          До согласия скрипт не отправляет запросы в Twitch.
+        </li>
+
+        <li>
+          Нажми <strong>New preset</strong>, задай имя и выбери эмоута для нужных слотов.
+          Клик по слоту открывает picker.
+        </li>
+
+        <li>
+          Чтобы сохранить текущую раскладку Twitch как основу для нового пресета,
+          используй <strong>Copy current</strong>.
+        </li>
+
+        <li>
+          Эмоута внутри одной категории можно переставлять drag-and-drop.
+          Жёлтая рамка предупреждает, если эмоута придётся перенести из другой категории.
+        </li>
+
+        <li>
+          Сохрани пресет и нажми <strong>Apply</strong>, когда захочешь применить его.
+          Во время выполнения в верхней части панели показывается текущий статус и кнопка
+          <strong>Stop</strong>.
+        </li>
+      </ol>
+
+      <div class="note">
+        <strong>Важно:</strong>
+        скрипт использует внутренние Twitch GQL-запросы. Twitch может изменить их без
+        предупреждения, поэтому после обновлений сайта отдельные функции иногда могут
+        потребовать обновления userscript'а.
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Что умеет</h2>
+
+      <div class="feature-grid">
+        <div class="feature">
+          <strong>Presets</strong>
+          <span>Сохраняет наборы эмоута и раскладку по слотам.</span>
+        </div>
+
+        <div class="feature">
+          <strong>Snapshot mode</strong>
+          <span>Может восстанавливать точное состояние, включая пустые слоты.</span>
+        </div>
+
+        <div class="feature">
+          <strong>Emote picker</strong>
+          <span>Поиск по библиотеке с превью статических и анимированных эмоута.</span>
+        </div>
+
+        <div class="feature">
+          <strong>Automatic updates</strong>
+          <span>Если установлен через этот файл, userscript manager может получать новые версии автоматически.</span>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      Made by AI under engineering direction of
+      <a href="https://www.twitch.tv/elrottenkotten" target="_blank" rel="noopener noreferrer">
+        elRottenKotten
+      </a>
+    </footer>
+  </main>
+</body>
+</html>
