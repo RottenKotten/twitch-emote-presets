@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Emote Presets
-// @namespace    kttn.local
-// @version      0.8.3
+// @namespace    https://github.com/RottenKotten/
+// @version      0.8.5
 // @description  ...
 // @match        https://dashboard.twitch.tv/*
 // @updateURL    https://rottenkotten.github.io/twitch-emote-presets/rktep.meta.js
@@ -2071,7 +2071,7 @@ const TWITCH_GQL_HASHES = Object.freeze({
         panel = h('div', { id: 'tep-panel' });
         const header = h('div', { class: 'tep-header' },
             h('button', { class: 'tep-collapse', title: 'Collapse panel', onclick: toggleCollapsed }, state.panel.collapsed ? '▸' : '▾'),
-            h('div', { class: 'tep-title', text: 'Twitch Emote Presets · v0.8.1' }),
+            h('div', { class: 'tep-title', text: 'Twitch Emote Presets · v0.8.5' }),
             h('div', { class: 'tep-header-actions' },
                 h('label', { class: 'tep-header-delay', title: 'Delay between Twitch mutations' },
                     h('span', { text: 'Delay' }),
