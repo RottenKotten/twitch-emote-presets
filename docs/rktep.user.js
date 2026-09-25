@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Emote Presets
 // @namespace    https://github.com/RottenKotten/
-// @version      0.8.5
+// @version      0.8.6
 // @description  ...
 // @match        https://dashboard.twitch.tv/*
 // @updateURL    https://rottenkotten.github.io/twitch-emote-presets/rktep.meta.js
@@ -1628,7 +1628,7 @@ const TWITCH_GQL_HASHES = Object.freeze({
         },
             h('img', {
                 class: 'tep-credit-banner-img',
-                src: 'rottenkotten.github.io/twitch-emote-presets/banner.png',
+                src: 'https://rottenkotten.github.io/twitch-emote-presets/banner.png',
                 alt: 'AI output · Mimic direction · elRottenKotten',
             }),
         );
