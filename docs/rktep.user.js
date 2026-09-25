@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Twitch Emote Presets
 // @namespace    https://github.com/RottenKotten/
-// @version      0.8.6
+// @version      0.8.9
 // @description  ...
 // @match        https://dashboard.twitch.tv/*
 // @updateURL    https://rottenkotten.github.io/twitch-emote-presets/rktep.meta.js
 // @downloadURL  https://rottenkotten.github.io/twitch-emote-presets/rktep.user.js
-// @run-at       document-idle
+// @run-at       document-start
 // @sandbox      raw
 // @grant        none
 // ==/UserScript==
@@ -36,6 +36,81 @@ const TWITCH_GQL_HASHES = Object.freeze({
     const GQL_URL = 'https://gql.twitch.tv/gql#origin=twilight';
     const INTEGRITY_URL = 'https://gql.twitch.tv/integrity';
     const DEFAULT_DELAY_MS = 700;
+
+    const twitchRuntime = {
+        clientVersion: null,
+        clientSessionId: readClientSessionId(),
+    };
+
+    // Capture native requests immediately; UI startup waits for the DOM below.
+    installTwitchFetchHook();
+    logTwitchRuntime();
+
+    function readClientSessionId() {
+        try {
+            const raw = localStorage.getItem('local_storage_app_session_id');
+            if (!raw) return null;
+            let value = raw;
+            try { value = JSON.parse(raw); } catch {}
+            return typeof value === 'string' && value.trim() ? value : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function logTwitchRuntime() {
+        console.log(LOG, 'Twitch runtime context', {
+            hasClientVersion: Boolean(twitchRuntime.clientVersion),
+            hasClientSessionId: Boolean(twitchRuntime.clientSessionId),
+        });
+    }
+
+    function captureTwitchHeaders(headers) {
+        if (!headers) return;
+        let changed = false;
+        const capture = (name, value) => {
+            const field = name === 'client-version' ? 'clientVersion' : 'clientSessionId';
+            if (typeof value === 'string' && value.trim() && twitchRuntime[field] !== value) {
+                twitchRuntime[field] = value;
+                changed = true;
+            }
+        };
+        const isContextHeader = name => name === 'client-version' || name === 'client-session-id';
+
+        // Read only the two context values, never credentials or integrity tokens.
+        if (headers instanceof Headers) {
+            for (const name of ['client-version', 'client-session-id']) capture(name, headers.get(name));
+        } else if (Array.isArray(headers)) {
+            for (const pair of headers) {
+                const name = typeof pair?.[0] === 'string' ? pair[0].toLowerCase() : '';
+                if (isContextHeader(name)) capture(name, pair[1]);
+            }
+        } else {
+            for (const key of Object.keys(headers)) {
+                const name = key.toLowerCase();
+                if (isContextHeader(name)) capture(name, headers[key]);
+            }
+        }
+        if (changed) logTwitchRuntime();
+    }
+
+    function installTwitchFetchHook() {
+        const originalFetch = window.fetch;
+        window.fetch = function () {
+            try {
+                const [input, init] = arguments;
+                const url = new URL(input instanceof Request ? input.url : input, location.href);
+                if (url.protocol === 'https:' && url.hostname === 'gql.twitch.tv' && url.pathname === '/gql') {
+                    // Explicit init headers replace Request.headers, just as in fetch.
+                    const headers = init?.headers;
+                    captureTwitchHeaders(headers === undefined && input instanceof Request ? input.headers : headers);
+                }
+            } catch {
+                // Inspection must never prevent or replace the original request.
+            }
+            return Reflect.apply(originalFetch, this, arguments);
+        };
+    }
     
 
     const OPS = {
@@ -234,6 +309,8 @@ const TWITCH_GQL_HASHES = Object.freeze({
             'Client-Integrity': integrity,
             'Content-Type': 'text/plain;charset=UTF-8',
         };
+        if (twitchRuntime.clientVersion) headers['Client-Version'] = twitchRuntime.clientVersion;
+        if (twitchRuntime.clientSessionId) headers['Client-Session-Id'] = twitchRuntime.clientSessionId;
         if (deviceID) headers['X-Device-Id'] = deviceID;
         return headers;
     }
@@ -855,12 +932,15 @@ const TWITCH_GQL_HASHES = Object.freeze({
         });
     }
 
-    async function removeEmote(emoteID, integrity) {
-        const payload = await gql(removeOperation(emoteID), integrity);
-        const result = payload?.data?.removeEmoteFromGroup;
-        if (result?.error) throw new Error(`Remove ${emoteID}: ${JSON.stringify(result.error)}`);
-        return payload;
-    }
+async function removeEmote(emoteID, integrity) {
+    const payload = await gql(removeOperation(emoteID), integrity);
+    const result = payload?.data?.removeEmoteFromGroup;
+
+    if (result?.error)
+        throw new Error(`Remove ${emoteID}: ${JSON.stringify(result.error)}`);
+
+    return payload;
+}
 
     async function assignSubscription(emoteID, productID, integrity) {
         const payload = await gql(assignSubscriptionOperation(emoteID, productID), integrity);
@@ -895,225 +975,256 @@ const TWITCH_GQL_HASHES = Object.freeze({
         return payload;
     }
 
-    function presetScope(preset) {
-        if (preset.mode === 'snapshot' && Array.isArray(preset.scope)) {
-            return new Set(preset.scope.filter(k => live.slotMap.has(k)));
-        }
-        return new Set((preset.assignments || []).map(a => a.slotKey).filter(k => live.slotMap.has(k)));
+    function applyPlanError(message) {
+        throw new Error(`Internal apply plan error: ${message}`);
     }
 
-    function groupTargetForPreset(preset) {
-        const assignmentMap = new Map((preset.assignments || []).map(a => [a.slotKey, a]));
-        const scope = presetScope(preset);
-        const groups = new Map();
+    function compareApplySlots(a, b) {
+        const kinds = { subscription: 0, follower: 1, bits: 2 };
+        const assets = { STATIC: 0, ANIMATED: 1 };
+        const text = (x, y) => String(x) < String(y) ? -1 : String(x) > String(y) ? 1 : 0;
+        return (kinds[a.kind] ?? 99) - (kinds[b.kind] ?? 99)
+            || Number(a.tier || 0) - Number(b.tier || 0)
+            || (assets[a.assetType] ?? 99) - (assets[b.assetType] ?? 99)
+            || Number(a.threshold || 0) - Number(b.threshold || 0)
+            || text(a.groupKey, b.groupKey)
+            || a.index - b.index || text(a.key, b.key);
+    }
 
-        for (const slotKey of scope) {
-            const slot = live.slotMap.get(slotKey);
-            if (!slot) continue;
-            if (!groups.has(slot.groupKey)) groups.set(slot.groupKey, { slot, slots: [] });
-            groups.get(slot.groupKey).slots.push(slot);
+    function applyEmoteName(id) {
+        return id ? live.catalog.get(id)?.label || id : 'empty';
+    }
+
+    function buildApplyPlan(preset) {
+        // Validate raw assignments before any Map can hide duplicate destinations.
+        const assignments = preset.assignments || [];
+        const destinations = new Set();
+        for (const a of assignments) {
+            const slot = live.slotMap.get(a.slotKey);
+            if (!slot?.writable) applyPlanError(`unavailable destination ${a.slotLabel || a.slotKey}`);
+            if (destinations.has(a.slotKey)) applyPlanError(`duplicate destination ${slot.label}`);
+            destinations.add(a.slotKey);
+            const emote = live.catalog.get(a.emoteID);
+            if (!emote) applyPlanError(`unknown emote ${a.emoteID}`);
+            if ((slot.assetType === 'ANIMATED') !== (emote.assetType === 'ANIMATED')) {
+                applyPlanError(`incompatible emote ${applyEmoteName(a.emoteID)} → ${slot.label}`);
+            }
+        }
+        let preflight;
+        try { preflight = preflightPreset(preset); } catch (e) { applyPlanError(e.message); }
+        const scope = new Set(preset.mode === 'snapshot' ? preset.scope || [] : destinations);
+        for (const key of scope) {
+            if (!live.slotMap.get(key)?.writable) applyPlanError(`unavailable scoped slot ${key}`);
+        }
+        for (const key of destinations) {
+            if (!scope.has(key)) applyPlanError(`assignment outside snapshot scope: ${key}`);
         }
 
-        // Patch presets only mention assigned slots. Snapshot presets include empty slots via scope.
-        for (const g of groups.values()) {
-            g.slots = live.slots.filter(s => s.groupKey === g.slot.groupKey).sort((a, b) => a.index - b.index);
-            g.desired = g.slots.map(s => {
-                const a = assignmentMap.get(s.key);
-                if (a) return a.emoteID;
-                return preset.mode === 'snapshot' && scope.has(s.key) ? null : s.currentEmoteID;
+        const slots = [...live.slots].sort(compareApplySlots);
+        const desired = new Map(slots.map(s => [s.key, s.currentEmoteID || null]));
+        if (preset.mode === 'snapshot') for (const key of scope) desired.set(key, null);
+        // Clear sources even outside scope, including moves within one category.
+        const sources = [...preflight.moves.map(m => m.source)];
+        for (const a of assignments) sources.push(...currentSlotsForEmote(a.emoteID).filter(s => s.key !== a.slotKey));
+        for (const source of sources) desired.set(source.key, null);
+        for (const a of assignments) desired.set(a.slotKey, a.emoteID);
+        const expected = new Map([...scope].map(key => [key, desired.get(key)]));
+        const groups = new Map();
+        for (const slot of slots) {
+            if (!groups.has(slot.groupKey)) groups.set(slot.groupKey, []);
+            groups.get(slot.groupKey).push(slot);
+        }
+        const plan = { removes: [], assigns: [], followerOrders: [], expected, slots, desired };
+        const removeIDs = new Set();
+        const remove = id => { if (id) removeIDs.add(id); };
+        for (const group of groups.values()) {
+            if (group.every(s => (s.currentEmoteID || null) === desired.get(s.key))) continue;
+            const first = group[0];
+            if (first.kind === 'subscription') {
+                // Sequential subscription assigns can only reproduce a compact list.
+                const target = group.map(s => desired.get(s.key)).filter(Boolean);
+                const current = group.map(s => s.currentEmoteID).filter(Boolean);
+                // Appending to an already correct compact prefix needs no rebuild.
+                const appendOnly = group.every((s, i) => (s.currentEmoteID || null) === (current[i] || null))
+                    && current.every((id, i) => id === target[i]);
+                group.forEach((s, i) => desired.set(s.key, target[i] || null));
+                for (const slot of group) {
+                    if (expected.has(slot.key) && expected.get(slot.key) !== desired.get(slot.key)) {
+                        applyPlanError(`${slot.label}: subscription ordering cannot preserve a gap; use a compact target layout`);
+                    }
+                    if (!appendOnly) remove(slot.currentEmoteID);
+                    const emoteID = desired.get(slot.key);
+                    if (emoteID && (!appendOnly || !slot.currentEmoteID)) plan.assigns.push({ emoteID, slot });
+                }
+            } else if (first.kind === 'follower' || first.kind === 'bits') {
+                for (const slot of group) {
+                    const emoteID = desired.get(slot.key);
+                    if ((slot.currentEmoteID || null) === emoteID) continue;
+                    remove(slot.currentEmoteID);
+                    if (emoteID) plan.assigns.push({ emoteID, slot });
+                }
+                if (first.kind === 'follower') {
+                    const orders = group.filter(s => desired.get(s.key)).map(s => ({ emoteID: desired.get(s.key), slot: s, order: s.index }));
+                    if (orders.length) plan.followerOrders.push({ groupKey: first.groupKey, orders });
+                }
+            } else applyPlanError(`unsupported category ${first.kind}`);
+        }
+        // An assign must be preceded by removal of any existing membership.
+        for (const op of plan.assigns) for (const source of currentSlotsForEmote(op.emoteID)) remove(source.currentEmoteID);
+        for (const id of removeIDs) {
+            const source = slots.find(s => s.currentEmoteID === id);
+            if (!source) applyPlanError(`missing removal source ${applyEmoteName(id)}`);
+            plan.removes.push({ emoteID: id, slot: source });
+        }
+        plan.removes.sort((a, b) => compareApplySlots(a.slot, b.slot));
+        plan.assigns.sort((a, b) => compareApplySlots(a.slot, b.slot));
+        plan.followerOrders.sort((a, b) => compareApplySlots(a.orders[0].slot, b.orders[0].slot));
+        validateApplyPlan(plan);
+        return plan;
+    }
+
+    function validateApplyPlan(plan) {
+        const removed = new Set();
+        for (const op of plan.removes) {
+            if (removed.has(op.emoteID)) applyPlanError(`duplicate remove ${applyEmoteName(op.emoteID)}`);
+            removed.add(op.emoteID);
+        }
+        const pairs = new Set(), destinations = new Set(), assigned = new Set(), finalIDs = new Set();
+        for (const id of plan.desired.values()) {
+            if (!id) continue;
+            if (finalIDs.has(id)) applyPlanError(`multiple final destinations for ${applyEmoteName(id)}`);
+            finalIDs.add(id);
+        }
+        for (const op of plan.assigns) {
+            const key = JSON.stringify([op.emoteID, op.slot.key]);
+            if (pairs.has(key) || assigned.has(op.emoteID)) applyPlanError(`duplicate assign ${applyEmoteName(op.emoteID)} → ${op.slot.label}`);
+            if (destinations.has(op.slot.key)) applyPlanError(`duplicate destination ${op.slot.label}`);
+            pairs.add(key);
+            assigned.add(op.emoteID);
+            destinations.add(op.slot.key);
+            if (currentSlotsForEmote(op.emoteID).length && !removed.has(op.emoteID)) applyPlanError(`missing source removal ${applyEmoteName(op.emoteID)}`);
+            if (plan.desired.get(op.slot.key) !== op.emoteID) applyPlanError(`assign disagrees with target ${op.slot.label}`);
+        }
+        // Every desired membership must survive removals or have exactly one assign.
+        for (const slot of plan.slots) {
+            const id = plan.desired.get(slot.key);
+            if (id && !assigned.has(id) && (removed.has(id) || slot.currentEmoteID !== id)) {
+                applyPlanError(`missing assign ${applyEmoteName(id)} → ${slot.label}`);
+            }
+        }
+    }
+
+    function logApplyPlan(plan) {
+        const lines = ['Apply plan', 'REMOVE:', ...plan.removes.map(x => `  ${applyEmoteName(x.emoteID)} <- ${x.slot.label}`),
+            'ASSIGN:', ...plan.assigns.map(x => `  ${applyEmoteName(x.emoteID)} -> ${x.slot.label}`),
+            'ORDER:', ...plan.followerOrders.flatMap(g => g.orders.map(x => `  ${x.slot.label} = ${applyEmoteName(x.emoteID)} (order ${x.order})`))];
+        console.log(LOG, lines.join('\n'));
+    }
+
+    async function refreshApplyState(phase) {
+        if (stopRequested) throw new Error('Stopped');
+        if (!await fetchLiveData({ quiet: true })) throw new Error(`Could not refresh emote layout ${phase}`);
+        if (stopRequested) throw new Error('Stopped');
+    }
+
+    function validateAfterRemoves(plan) {
+        const removed = new Set(plan.removes.map(x => x.emoteID));
+        // Compare membership, not compact slot indices, which removals can shift.
+        const memberships = slots => slots.map(s => JSON.stringify([s.groupKey, s.currentEmoteID])).sort();
+        const expected = memberships(plan.slots.filter(s => s.currentEmoteID && !removed.has(s.currentEmoteID)));
+        const actual = memberships(live.slots.filter(s => s.currentEmoteID));
+        if (JSON.stringify(expected) !== JSON.stringify(actual)) {
+            throw new Error('Apply state changed after removals: membership differs from the plan. Reload and try again.');
+        }
+        for (const op of plan.assigns) {
+            const slot = live.slotMap.get(op.slot.key);
+            if (!slot?.writable || ['kind', 'groupKey', 'productID', 'channelID', 'threshold', 'assetType'].some(k => slot[k] !== op.slot[k])) {
+                throw new Error(`Apply destination changed after removals: ${op.slot.label}`);
+            }
+        }
+    }
+
+    async function executeApplyMutation(execution, label, mutate) {
+        if (stopRequested) throw new Error('Stopped');
+        setStatus(`${execution.name}: ${label}`);
+        const result = await withIntegrityRetry(token => {
+            // Also protect a retry after an integrity refresh from a pending Stop.
+            if (stopRequested) throw new Error('Stopped');
+            return mutate(token);
+        }, execution.integrity);
+        execution.integrity = result.integrity;
+        execution.operationsDone++;
+        await sleep(state.delayMs);
+    }
+
+    async function executeRemovePhase(plan, execution) {
+        for (const op of plan.removes) {
+            await executeApplyMutation(execution, `remove ${applyEmoteName(op.emoteID)} ← ${op.slot.label}`, token => removeEmote(op.emoteID, token));
+        }
+    }
+
+    async function executeAssignPhase(plan, execution) {
+        for (const op of plan.assigns) {
+            const slot = live.slotMap.get(op.slot.key);
+            await executeApplyMutation(execution, `assign ${applyEmoteName(op.emoteID)} → ${slot.label}`, token => {
+                if (slot.kind === 'subscription') return assignSubscription(op.emoteID, slot.productID, token);
+                if (slot.kind === 'follower') return assignFollower(op.emoteID, slot.channelID || live.userID, token);
+                return assignBits(op.emoteID, slot.channelID || live.userID, slot.threshold, token);
             });
         }
-        return groups;
     }
 
-    async function runRemove(id, integrity) {
-        const r = await withIntegrityRetry(tok => removeEmote(id, tok), integrity);
-        return r.integrity;
-    }
-
-    async function runAssignForGroup(slot0, id, integrity) {
-        let r;
-        if (slot0.kind === 'subscription') {
-            r = await withIntegrityRetry(tok => assignSubscription(id, slot0.productID, tok), integrity);
-        } else if (slot0.kind === 'follower') {
-            r = await withIntegrityRetry(tok => assignFollower(id, slot0.channelID || live.userID, tok), integrity);
-        } else {
-            throw new Error(`${slot0.label}: unsupported compact group kind ${slot0.kind}`);
+    async function executeReorderPhase(plan, execution) {
+        if (!plan.followerOrders.length) return;
+        await refreshApplyState('before Free ordering');
+        for (const group of plan.followerOrders) {
+            const followerSlots = live.slots.filter(s => s.groupKey === group.groupKey && s.currentEmoteID);
+            const present = new Set(followerSlots.map(s => s.currentEmoteID));
+            if (present.size !== group.orders.length || group.orders.some(x => !present.has(x.emoteID))) {
+                throw new Error('Free ordering: membership differs from the plan after assign');
+            }
+            const groupID = followerSlots.map(s => s.currentEmote?.setID || live.catalog.get(s.currentEmoteID)?.setID).find(Boolean);
+            if (!groupID) throw new Error('Free ordering: follower groupID not found');
+            const orders = group.orders.map(x => ({ emoteID: x.emoteID, groupID, order: x.order }));
+            await executeApplyMutation(execution, 'order Free slots', token => updateEmoteOrders(orders, token));
         }
-        return r.integrity;
+    }
+
+    function verifyAppliedPreset(plan) {
+        const mismatches = [];
+        for (const slot of plan.slots) {
+            if (!plan.expected.has(slot.key)) continue;
+            const expected = plan.expected.get(slot.key);
+            const actual = live.slotMap.get(slot.key);
+            if (!actual || (actual.currentEmoteID || null) !== expected) {
+                mismatches.push(`${slot.label}: expected ${applyEmoteName(expected)}, got ${actual ? applyEmoteName(actual.currentEmoteID) : 'missing slot'}`);
+            }
+        }
+        if (mismatches.length) throw new Error(`Preset verification failed: ${mismatches.join('; ')}`);
     }
 
     async function applyPreset(preset) {
         if (running) return;
+        if (!twitchRuntime.clientVersion) {
+            setStatus('Twitch Client-Version has not been captured yet. Reload the dashboard page and try again.', 'error');
+            return;
+        }
         running = true;
         stopRequested = false;
         render();
-
         try {
-            const ok = await fetchLiveData({ quiet: true });
-            if (!ok) throw new Error('Could not refresh current emote layout');
-
-            const preflight = preflightPreset(preset);
-            if (preflight.moves.length) {
-                console.warn(LOG, 'Preset will move emotes from existing slots', preflight.moves.map(x => ({
-                    emote: live.catalog.get(x.emoteID)?.label || x.emoteID,
-                    from: x.source?.label,
-                    to: x.target?.label,
-                })));
-            }
-
-            let integrity = await getIntegrityToken();
-            const groups = groupTargetForPreset(preset);
-            let operationsDone = 0;
-
-            for (const [groupKey, g] of groups) {
-                if (stopRequested) throw new Error('Stopped');
-                const slot0 = g.slot;
-
-                if (slot0.kind === 'bits') {
-                    // Bits threshold is a true addressable slot, so update it directly.
-                    const slot = g.slots[0];
-                    const current = slot.currentEmoteID || null;
-                    const target = g.desired[0] || null;
-                    if (current === target) continue;
-
-                    setStatus(`${preset.name}: ${slot.label} ${current ? 'replace' : 'assign'}${target ? '' : ' → empty'}`);
-                    if (current) {
-                        integrity = await runRemove(current, integrity);
-                        operationsDone++;
-                        await sleep(state.delayMs);
-                    }
-                    if (target) {
-                        const r = await withIntegrityRetry(tok => assignBits(target, slot.channelID || live.userID, slot.threshold, tok), integrity);
-                        integrity = r.integrity;
-                        operationsDone++;
-                        await sleep(state.delayMs);
-                    }
-                    continue;
-                }
-
-                if (slot0.kind === 'follower') {
-                    // Follower assignment has no numeric slot argument, but Twitch exposes
-                    // EmotesSettingsUpdateEmoteOrders for the group. Mutate membership first,
-                    // then explicitly restore the preset's Free1..FreeN order.
-                    const changed = g.slots
-                        .map((slot, i) => ({
-                            slot,
-                            current: slot.currentEmoteID || null,
-                            target: g.desired[i] || null,
-                        }))
-                        .filter(x => x.current !== x.target)
-                        .sort((a, b) => a.slot.index - b.slot.index);
-
-                    if (!changed.length) continue;
-                    setStatus(`${preset.name}: update Free (${changed.length} slot${changed.length === 1 ? '' : 's'})`);
-
-                    for (const x of changed) {
-                        if (stopRequested) throw new Error('Stopped');
-                        if (!x.current) continue;
-                        console.log(LOG, 'Free remove', x.slot.label, x.current);
-                        integrity = await runRemove(x.current, integrity);
-                        operationsDone++;
-                        await sleep(state.delayMs);
-                    }
-
-                    for (const x of changed) {
-                        if (stopRequested) throw new Error('Stopped');
-                        if (!x.target) continue;
-                        console.log(LOG, 'Free assign', x.slot.label, x.target);
-                        const r = await withIntegrityRetry(
-                            tok => assignFollower(x.target, x.slot.channelID || live.userID, tok),
-                            integrity,
-                        );
-                        integrity = r.integrity;
-                        operationsDone++;
-                        await sleep(state.delayMs);
-                    }
-
-                    // Refresh after membership changes so we have Twitch's current follower groupID.
-                    const refreshed = await fetchLiveData({ quiet: true });
-                    if (!refreshed) throw new Error('Could not refresh Free slots before ordering');
-
-                    const followerSlots = live.slots
-                        .filter(s => s.kind === 'follower')
-                        .sort((a, b) => a.index - b.index);
-                    const present = new Set(followerSlots.map(s => s.currentEmoteID).filter(Boolean));
-                    const desiredWithOrder = g.desired
-                        .map((id, order) => id ? { id, order } : null)
-                        .filter(Boolean);
-
-                    for (const x of desiredWithOrder) {
-                        if (!present.has(x.id)) {
-                            throw new Error(`Free ordering: ${live.catalog.get(x.id)?.label || x.id} is not in the follower group after assign`);
-                        }
-                    }
-
-                    if (desiredWithOrder.length) {
-                        const groupID = followerSlots
-                            .map(s => s.currentEmote?.setID || live.catalog.get(s.currentEmoteID)?.setID)
-                            .find(Boolean);
-                        if (!groupID) throw new Error('Free ordering: follower groupID not found');
-
-                        const orders = desiredWithOrder.map(x => ({
-                            emoteID: x.id,
-                            groupID,
-                            order: x.order,
-                        }));
-                        console.log(LOG, 'Free order', orders);
-                        const r = await withIntegrityRetry(tok => updateEmoteOrders(orders, tok), integrity);
-                        integrity = r.integrity;
-                        operationsDone++;
-                        await sleep(state.delayMs);
-                    }
-                    continue;
-                }
-
-                // Subscription mutation does not expose a numeric slot/order.
-                // Rebuild the compact group so logical TierX_N order is deterministic.
-                const current = g.slots.map(s => s.currentEmoteID).filter(Boolean);
-                const target = g.desired.filter(Boolean);
-                if (current.length === target.length && current.every((id, i) => id === target[i])) continue;
-
-                const groupName = slot0.label.split('_')[0];
-                setStatus(`${preset.name}: rebuild ${groupName} (${current.length} → ${target.length})`);
-
-                for (const id of current) {
-                    if (stopRequested) throw new Error('Stopped');
-                    integrity = await runRemove(id, integrity);
-                    operationsDone++;
-                    await sleep(state.delayMs);
-                }
-                for (const id of target) {
-                    if (stopRequested) throw new Error('Stopped');
-                    integrity = await runAssignForGroup(slot0, id, integrity);
-                    operationsDone++;
-                    await sleep(state.delayMs);
-                }
-            }
-
-            await fetchLiveData({ quiet: true });
-
-            // Verify Free slots explicitly: follower assign has no numeric slot argument,
-            // so a successful mutation alone is not enough to prove the requested layout.
-            const verifyScope = presetScope(preset);
-            const assignmentMap = new Map((preset.assignments || []).map(a => [a.slotKey, a.emoteID]));
-            const followerMismatches = [];
-            for (const key of verifyScope) {
-                const slot = live.slotMap.get(key);
-                if (!slot || slot.kind !== 'follower') continue;
-                const expected = assignmentMap.has(key)
-                    ? assignmentMap.get(key)
-                    : (preset.mode === 'snapshot' ? null : slot.currentEmoteID);
-                if ((slot.currentEmoteID || null) !== (expected || null)) {
-                    followerMismatches.push(`${slot.label}: expected ${expected || 'empty'}, got ${slot.currentEmoteID || 'empty'}`);
-                }
-            }
-            if (followerMismatches.length) {
-                console.error(LOG, 'Free verification failed', followerMismatches);
-                throw new Error(`Free verification failed: ${followerMismatches.join('; ')}`);
-            }
-
-            setStatus(`✓ ${preset.name}: ${operationsDone} requests`, 'ok');
+            await refreshApplyState('before planning');
+            const plan = buildApplyPlan(preset);
+            logApplyPlan(plan);
+            const execution = { name: preset.name, integrity: await getIntegrityToken(), operationsDone: 0 };
+            await executeRemovePhase(plan, execution);
+            await refreshApplyState('after removals');
+            validateAfterRemoves(plan);
+            await executeAssignPhase(plan, execution);
+            await executeReorderPhase(plan, execution);
+            await refreshApplyState('before verification');
+            verifyAppliedPreset(plan);
+            setStatus(`✓ ${preset.name}: ${execution.operationsDone} requests`, 'ok');
         } catch (e) {
             if (e.message === 'Stopped') setStatus('Stopped');
             else {
@@ -2071,7 +2182,7 @@ const TWITCH_GQL_HASHES = Object.freeze({
         panel = h('div', { id: 'tep-panel' });
         const header = h('div', { class: 'tep-header' },
             h('button', { class: 'tep-collapse', title: 'Collapse panel', onclick: toggleCollapsed }, state.panel.collapsed ? '▸' : '▾'),
-            h('div', { class: 'tep-title', text: 'Twitch Emote Presets · v0.8.5' }),
+            h('div', { class: 'tep-title', text: 'Twitch Emote Presets · v0.8.9' }),
             h('div', { class: 'tep-header-actions' },
                 h('label', { class: 'tep-header-delay', title: 'Delay between Twitch mutations' },
                     h('span', { text: 'Delay' }),
@@ -2128,7 +2239,8 @@ const TWITCH_GQL_HASHES = Object.freeze({
         }, true);
     }
 
-    console.log(LOG, 'v0.8.1 boot', { href: location.href, sandbox: 'raw' });
+    console.log(LOG, 'v0.8.9 boot', { href: location.href, sandbox: 'raw' });
+    // Styles, panel, route watcher and UI listeners require a ready document.
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount, { once: true });
     else mount();
 })();
